@@ -24,8 +24,8 @@ mvn compile exec:java \
 -Dexec.cleanupDaemonThreads=false \
 -Dexec.args=" \
 --project=epidemic-data-infra \
---stagingLocation=gs://dataflow-staging-europe-west1-105942741667/templates/google/staging \
---tempLocation=gs://dataflow-staging-europe-west1-105942741667/templates/google/temp \
+--stagingLocation=gs://dataflow-staging-europe-west1-105942741667/staging \
+--tempLocation=gs://dataflow-staging-europe-west1-105942741667/temp \
 --templateLocation=gs://dataflow-staging-europe-west1-105942741667/templates/google/[DATE in YYYY-MM-DD]/PubsubToAvro \
 --runner=DataflowRunner \
 --region=europe-west1 \
