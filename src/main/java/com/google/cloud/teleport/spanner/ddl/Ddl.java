@@ -15,6 +15,7 @@
  */
 package com.google.cloud.teleport.spanner.ddl;
 
+import com.google.cloud.spanner.Dialect;
 import com.google.cloud.teleport.spanner.ExportProtos.Export;
 import com.google.common.base.Function;
 import com.google.common.collect.Collections2;
@@ -45,22 +46,32 @@ public class Ddl implements Serializable {
 
   private ImmutableSortedMap<String, Table> tables;
   private ImmutableSortedMap<String, View> views;
+  private ImmutableSortedMap<String, ChangeStream> changeStreams;
   private TreeMultimap<String, String> parents;
   // This is only populated by InformationSchemaScanner and not while reading from AVRO files.
   private TreeMultimap<String, String> referencedTables;
   private final ImmutableList<Export.DatabaseOption> databaseOptions;
+  private final Dialect dialect;
 
   private Ddl(
       ImmutableSortedMap<String, Table> tables,
       ImmutableSortedMap<String, View> views,
+      ImmutableSortedMap<String, ChangeStream> changeStreams,
       TreeMultimap<String, String> parents,
       TreeMultimap<String, String> referencedTables,
-      ImmutableList<Export.DatabaseOption> databaseOptions) {
+      ImmutableList<Export.DatabaseOption> databaseOptions,
+      Dialect dialect) {
     this.tables = tables;
     this.views = views;
+    this.changeStreams = changeStreams;
     this.parents = parents;
     this.referencedTables = referencedTables;
     this.databaseOptions = databaseOptions;
+    this.dialect = dialect;
+  }
+
+  public Dialect dialect() {
+    return dialect;
   }
 
   public Collection<Table> allTables() {
@@ -121,13 +132,21 @@ public class Ddl implements Serializable {
     return views.get(viewName.toLowerCase());
   }
 
+  public Collection<ChangeStream> changeStreams() {
+    return changeStreams.values();
+  }
+
+  public ChangeStream changeStream(String changeStreamName) {
+    return changeStreams.get(changeStreamName.toLowerCase());
+  }
+
   public ImmutableList<Export.DatabaseOption> databaseOptions() {
     return databaseOptions;
   }
 
   public void prettyPrint(Appendable appendable) throws IOException {
     for (Export.DatabaseOption databaseOption : databaseOptions()) {
-      appendable.append(getDatabaseOptionsStatements(databaseOption, "%db_name%"));
+      appendable.append(getDatabaseOptionsStatements(databaseOption, "%db_name%", dialect));
       appendable.append("\n");
     }
 
@@ -161,6 +180,11 @@ public class Ddl implements Serializable {
       appendable.append("\n");
       view.prettyPrint(appendable);
     }
+
+    for (ChangeStream changeStream : changeStreams()) {
+      appendable.append("\n");
+      changeStream.prettyPrint(appendable);
+    }
   }
 
   public List<String> statements() {
@@ -169,6 +193,7 @@ public class Ddl implements Serializable {
         .addAll(createIndexStatements())
         .addAll(addForeignKeyStatements())
         .addAll(createViewStatements())
+        .addAll(createChangeStreamStatements())
         .addAll(setOptionsStatements("%db_name%"))
         .build();
   }
@@ -227,27 +252,48 @@ public class Ddl implements Serializable {
     return result;
   }
 
+  public List<String> createChangeStreamStatements() {
+    List<String> result = new ArrayList<>(changeStreams.size());
+    for (ChangeStream changeStream : changeStreams()) {
+      result.add(changeStream.prettyPrint());
+    }
+    return result;
+  }
+
   public List<String> setOptionsStatements(String databaseId) {
     List<String> result = new ArrayList<>();
     for (Export.DatabaseOption databaseOption : databaseOptions()) {
-      result.add(getDatabaseOptionsStatements(databaseOption, databaseId));
+      result.add(getDatabaseOptionsStatements(databaseOption, databaseId, dialect));
     }
     return result;
   }
 
   private static String getDatabaseOptionsStatements(
-      Export.DatabaseOption databaseOption, String databaseId) {
+      Export.DatabaseOption databaseOption, String databaseId, Dialect dialect) {
+    String literalQuote = DdlUtilityComponents.literalQuote(dialect);
     String formattedValue =
         databaseOption.getOptionType().equalsIgnoreCase("STRING")
-            ? "\""
+            ? literalQuote
                 + DdlUtilityComponents.OPTION_STRING_ESCAPER.escape(databaseOption.getOptionValue())
-                + "\""
+                + literalQuote
             : databaseOption.getOptionValue();
-
-    String statement =
-        String.format(
-            "ALTER DATABASE `%s` SET OPTIONS ( %s = %s )",
-            databaseId, databaseOption.getOptionName(), formattedValue);
+    String statement;
+    switch (dialect) {
+      case GOOGLE_STANDARD_SQL:
+        statement =
+            String.format(
+                "ALTER DATABASE `%s` SET OPTIONS ( %s = %s )",
+                databaseId, databaseOption.getOptionName(), formattedValue);
+        break;
+      case POSTGRESQL:
+        statement =
+            String.format(
+                "ALTER DATABASE \"%s\" SET spanner.%s = %s",
+                databaseId, databaseOption.getOptionName(), formattedValue);
+        break;
+      default:
+        throw new IllegalArgumentException(String.format("Unrecognized Dialect: %s", dialect));
+    }
     return statement;
   }
 
@@ -281,7 +327,11 @@ public class Ddl implements Serializable {
   }
 
   public static Builder builder() {
-    return new Builder();
+    return new Builder(Dialect.GOOGLE_STANDARD_SQL);
+  }
+
+  public static Builder builder(Dialect dialect) {
+    return new Builder(dialect);
   }
 
   /** A builder for {@link Ddl}. */
@@ -289,14 +339,20 @@ public class Ddl implements Serializable {
 
     private Map<String, Table> tables = Maps.newLinkedHashMap();
     private Map<String, View> views = Maps.newLinkedHashMap();
+    private Map<String, ChangeStream> changeStreams = Maps.newLinkedHashMap();
     private TreeMultimap<String, String> parents = TreeMultimap.create();
     private TreeMultimap<String, String> referencedTables = TreeMultimap.create();
     private ImmutableList<Export.DatabaseOption> databaseOptions = ImmutableList.of();
+    private Dialect dialect;
+
+    public Builder(Dialect dialect) {
+      this.dialect = dialect;
+    }
 
     public Table.Builder createTable(String name) {
       Table table = tables.get(name.toLowerCase());
       if (table == null) {
-        return Table.builder().name(name).ddlBuilder(this);
+        return Table.builder(dialect).name(name).ddlBuilder(this);
       }
       return table.toBuilder().ddlBuilder(this);
     }
@@ -320,7 +376,7 @@ public class Ddl implements Serializable {
     public View.Builder createView(String name) {
       View view = views.get(name.toLowerCase());
       if (view == null) {
-        return View.builder().name(name).ddlBuilder(this);
+        return View.builder(dialect).name(name).ddlBuilder(this);
       }
       return view.toBuilder().ddlBuilder(this);
     }
@@ -331,6 +387,22 @@ public class Ddl implements Serializable {
 
     public boolean hasView(String name) {
       return views.containsKey(name.toLowerCase());
+    }
+
+    public ChangeStream.Builder createChangeStream(String name) {
+      ChangeStream changeStream = changeStreams.get(name.toLowerCase());
+      if (changeStream == null) {
+        return ChangeStream.builder().name(name).ddlBuilder(this);
+      }
+      return changeStream.toBuilder().ddlBuilder(this);
+    }
+
+    public void addChangeStream(ChangeStream changeStream) {
+      changeStreams.put(changeStream.name().toLowerCase(), changeStream);
+    }
+
+    public boolean hasChangeStream(String name) {
+      return changeStreams.containsKey(name.toLowerCase());
     }
 
     public void mergeDatabaseOptions(List<Export.DatabaseOption> databaseOptions) {
@@ -356,16 +428,19 @@ public class Ddl implements Serializable {
       return new Ddl(
           ImmutableSortedMap.copyOf(tables),
           ImmutableSortedMap.copyOf(views),
+          ImmutableSortedMap.copyOf(changeStreams),
           parents,
           referencedTables,
-          databaseOptions);
+          databaseOptions,
+          dialect);
     }
   }
 
   public Builder toBuilder() {
-    Builder builder = new Builder();
+    Builder builder = new Builder(dialect);
     builder.tables.putAll(tables);
     builder.views.putAll(views);
+    builder.changeStreams.putAll(changeStreams);
     builder.parents.putAll(parents);
     builder.referencedTables.putAll(referencedTables);
     builder.databaseOptions = databaseOptions;
@@ -383,6 +458,9 @@ public class Ddl implements Serializable {
 
     Ddl ddl = (Ddl) o;
 
+    if (dialect != ddl.dialect) {
+      return false;
+    }
     if (tables != null ? !tables.equals(ddl.tables) : ddl.tables != null) {
       return false;
     }
@@ -397,15 +475,22 @@ public class Ddl implements Serializable {
     if (views != null ? !views.equals(ddl.views) : ddl.views != null) {
       return false;
     }
+    if (changeStreams != null
+        ? !changeStreams.equals(ddl.changeStreams)
+        : ddl.changeStreams != null) {
+      return false;
+    }
     return databaseOptions.equals(ddl.databaseOptions);
   }
 
   @Override
   public int hashCode() {
-    int result = tables != null ? tables.hashCode() : 0;
+    int result = dialect != null ? dialect.hashCode() : 0;
+    result = 31 * result + (tables != null ? tables.hashCode() : 0);
     result = 31 * result + (parents != null ? parents.hashCode() : 0);
     result = 31 * result + (referencedTables != null ? referencedTables.hashCode() : 0);
     result = 31 * result + (views != null ? views.hashCode() : 0);
+    result = 31 * result + (changeStreams != null ? changeStreams.hashCode() : 0);
     result = 31 * result + (databaseOptions != null ? databaseOptions.hashCode() : 0);
     return result;
   }

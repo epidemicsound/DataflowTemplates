@@ -15,6 +15,7 @@
  */
 package com.google.cloud.teleport.spanner;
 
+import com.google.cloud.spanner.Dialect;
 import com.google.cloud.spanner.Struct;
 import com.google.cloud.spanner.Type;
 import com.google.cloud.teleport.spanner.ddl.Ddl;
@@ -23,9 +24,9 @@ import com.google.cloud.teleport.spanner.ddl.Table;
 import com.google.common.collect.Lists;
 import java.util.ArrayList;
 import java.util.Base64;
-import org.apache.beam.sdk.io.gcp.spanner.LocalSpannerIO;
 import org.apache.beam.sdk.io.gcp.spanner.ReadOperation;
 import org.apache.beam.sdk.io.gcp.spanner.SpannerConfig;
+import org.apache.beam.sdk.io.gcp.spanner.SpannerIO;
 import org.apache.beam.sdk.io.gcp.spanner.Transaction;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.Count;
@@ -104,10 +105,16 @@ public class CompareDatabases extends PTransform<PBegin, PCollection<Long>> {
     @Override
     public PCollection<KV<String, Struct>> expand(PBegin begin) {
       PCollectionView<Transaction> tx =
-          begin.apply(LocalSpannerIO.createTransaction().withSpannerConfig(spanConfig));
+          begin.apply(SpannerIO.createTransaction().withSpannerConfig(spanConfig));
+
+      PCollectionView<Dialect> dialectView =
+          begin
+              .apply("Read Dialect", new ReadDialect(spanConfig))
+              .apply("As PCollectionView", View.asSingleton());
 
       PCollection<Ddl> sourceDdl =
-          begin.apply("Read Information Schema", new ReadInformationSchema(spanConfig, tx));
+          begin.apply(
+              "Read Information Schema", new ReadInformationSchema(spanConfig, tx, dialectView));
 
       final PCollectionView<Ddl> ddlView = sourceDdl.apply(View.asSingleton());
 
@@ -118,7 +125,7 @@ public class CompareDatabases extends PTransform<PBegin, PCollection<Long>> {
       PCollection<Struct> rows =
           tables.apply(
               "Read rows from tables",
-              LocalSpannerIO.readAll().withTransaction(tx).withSpannerConfig(spanConfig));
+              SpannerIO.readAll().withTransaction(tx).withSpannerConfig(spanConfig));
 
       return rows.apply(
           ParDo.of(
@@ -146,6 +153,7 @@ public class CompareDatabases extends PTransform<PBegin, PCollection<Long>> {
                             key += struct.getLong(pk.name());
                             break;
                           case STRING:
+                          case PG_NUMERIC:
                             key += struct.getString(pk.name());
                             break;
                           case BYTES:
@@ -161,6 +169,9 @@ public class CompareDatabases extends PTransform<PBegin, PCollection<Long>> {
                             break;
                           case DATE:
                             key += struct.getDate(pk.name());
+                            break;
+                          case NUMERIC:
+                            key += struct.getBigDecimal(pk.name());
                             break;
                           default:
                             throw new IllegalArgumentException("Unsupported PK type " + columnType);

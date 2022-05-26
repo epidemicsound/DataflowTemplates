@@ -15,7 +15,9 @@
  */
 package com.google.cloud.teleport.spanner;
 
+import com.google.cloud.spanner.Dialect;
 import com.google.cloud.teleport.spanner.common.NumericUtils;
+import com.google.cloud.teleport.spanner.ddl.ChangeStream;
 import com.google.cloud.teleport.spanner.ddl.Column;
 import com.google.cloud.teleport.spanner.ddl.Ddl;
 import com.google.cloud.teleport.spanner.ddl.IndexColumn;
@@ -54,15 +56,29 @@ public class DdlToAvroSchemaConverter {
         recordBuilder.prop(
             "spannerOnDeleteAction", table.onDeleteCascade() ? "cascade" : "no action");
       }
-      if (table.primaryKeys() != null) {
-        String encodedPk =
-            table.primaryKeys().stream()
-                .map(IndexColumn::prettyPrint)
-                .collect(Collectors.joining(","));
-        recordBuilder.prop("spannerPrimaryKey", encodedPk);
-      }
-      for (int i = 0; i < table.primaryKeys().size(); i++) {
-        recordBuilder.prop("spannerPrimaryKey_" + i, table.primaryKeys().get(i).prettyPrint());
+      if (table.dialect() == Dialect.GOOGLE_STANDARD_SQL) {
+        if (table.primaryKeys() != null) {
+          String encodedPk =
+              table.primaryKeys().stream()
+                  .map(IndexColumn::prettyPrint)
+                  .collect(Collectors.joining(","));
+          recordBuilder.prop("spannerPrimaryKey", encodedPk);
+        }
+        for (int i = 0; i < table.primaryKeys().size(); i++) {
+          recordBuilder.prop("spannerPrimaryKey_" + i, table.primaryKeys().get(i).prettyPrint());
+        }
+      } else if (table.dialect() == Dialect.POSTGRESQL) {
+        if (table.primaryKeys() != null) {
+          String encodedPk =
+              table.primaryKeys().stream()
+                  .map(c -> "\"" + c.name() + "\"")
+                  .collect(Collectors.joining(", "));
+          recordBuilder.prop("spannerPrimaryKey", encodedPk);
+        }
+        for (int i = 0; i < table.primaryKeys().size(); i++) {
+          IndexColumn pk = table.primaryKeys().get(i);
+          recordBuilder.prop("spannerPrimaryKey_" + i, "\"" + pk.name() + "\" ASC");
+        }
       }
       for (int i = 0; i < table.indexes().size(); i++) {
         recordBuilder.prop("spannerIndex_" + i, table.indexes().get(i));
@@ -88,6 +104,9 @@ public class DdlToAvroSchemaConverter {
           // which are semantically logical entities.
           fieldBuilder.type(SchemaBuilder.builder().nullType()).withDefault(null);
         } else {
+          if (cm.defaultExpression() != null) {
+            fieldBuilder.prop("defaultExpression", cm.defaultExpression());
+          }
           Schema avroType = avroType(cm.type());
           if (!cm.notNull()) {
             avroType = wrapAsNullable(avroType);
@@ -111,31 +130,59 @@ public class DdlToAvroSchemaConverter {
       schemas.add(recordBuilder.fields().endRecord());
     }
 
+    for (ChangeStream changeStream : ddl.changeStreams()) {
+      SchemaBuilder.RecordBuilder<Schema> recordBuilder =
+          SchemaBuilder.record(changeStream.name()).namespace(this.namespace);
+      recordBuilder.prop("googleFormatVersion", version);
+      recordBuilder.prop("googleStorage", "CloudSpanner");
+      recordBuilder.prop(
+          AvroUtil.CHANGE_STREAM_FOR_CLAUSE,
+          changeStream.forClause() == null ? "" : changeStream.forClause());
+      if (changeStream.options() != null) {
+        for (int i = 0; i < changeStream.options().size(); i++) {
+          recordBuilder.prop("spannerOption_" + i, changeStream.options().get(i));
+        }
+      }
+      schemas.add(recordBuilder.fields().endRecord());
+    }
+
     return schemas;
   }
 
   private Schema avroType(com.google.cloud.teleport.spanner.common.Type spannerType) {
     switch (spannerType.getCode()) {
       case BOOL:
+      case PG_BOOL:
         return SchemaBuilder.builder().booleanType();
       case INT64:
+      case PG_INT8:
         return SchemaBuilder.builder().longType();
       case FLOAT64:
+      case PG_FLOAT8:
         return SchemaBuilder.builder().doubleType();
+      case PG_TEXT:
+      case PG_VARCHAR:
       case STRING:
       case DATE:
+      case PG_DATE:
       case JSON:
         return SchemaBuilder.builder().stringType();
       case BYTES:
+      case PG_BYTEA:
         return SchemaBuilder.builder().bytesType();
       case TIMESTAMP:
+      case PG_TIMESTAMPTZ:
         return shouldExportTimestampAsLogicalType
             ? LogicalTypes.timestampMicros().addToSchema(SchemaBuilder.builder().longType())
             : SchemaBuilder.builder().stringType();
       case NUMERIC:
         return LogicalTypes.decimal(NumericUtils.PRECISION, NumericUtils.SCALE)
             .addToSchema(SchemaBuilder.builder().bytesType());
+      case PG_NUMERIC:
+        return LogicalTypes.decimal(NumericUtils.PG_MAX_PRECISION, NumericUtils.PG_MAX_SCALE)
+            .addToSchema(SchemaBuilder.builder().bytesType());
       case ARRAY:
+      case PG_ARRAY:
         Schema avroItemsType = avroType(spannerType.getArrayElementType());
         return SchemaBuilder.builder().array().items().type(wrapAsNullable(avroItemsType));
       default:

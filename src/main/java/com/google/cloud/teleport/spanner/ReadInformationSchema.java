@@ -18,9 +18,10 @@ package com.google.cloud.teleport.spanner;
 import com.google.cloud.spanner.BatchClient;
 import com.google.cloud.spanner.BatchReadOnlyTransaction;
 import com.google.cloud.spanner.BatchTransactionId;
+import com.google.cloud.spanner.Dialect;
 import com.google.cloud.teleport.spanner.ddl.Ddl;
 import com.google.cloud.teleport.spanner.ddl.InformationSchemaScanner;
-import org.apache.beam.sdk.io.gcp.spanner.ExposedSpannerAccessor;
+import org.apache.beam.sdk.io.gcp.spanner.SpannerAccessor;
 import org.apache.beam.sdk.io.gcp.spanner.SpannerConfig;
 import org.apache.beam.sdk.io.gcp.spanner.Transaction;
 import org.apache.beam.sdk.transforms.Create;
@@ -36,10 +37,15 @@ public class ReadInformationSchema extends PTransform<PBegin, PCollection<Ddl>> 
 
   private final SpannerConfig spannerConfig;
   private final PCollectionView<Transaction> tx;
+  private final PCollectionView<Dialect> dialectView;
 
-  public ReadInformationSchema(SpannerConfig spannerConfig, PCollectionView<Transaction> tx) {
+  public ReadInformationSchema(
+      SpannerConfig spannerConfig,
+      PCollectionView<Transaction> tx,
+      PCollectionView<Dialect> dialectView) {
     this.spannerConfig = spannerConfig;
     this.tx = tx;
+    this.dialectView = dialectView;
   }
 
   @Override
@@ -47,22 +53,28 @@ public class ReadInformationSchema extends PTransform<PBegin, PCollection<Ddl>> 
     return p.apply("Create empty", Create.of((Void) null))
         .apply(
             "Read Information Schema",
-            ParDo.of(new ReadInformationSchemaFn(spannerConfig, tx)).withSideInputs(tx));
+            ParDo.of(new ReadInformationSchemaFn(spannerConfig, tx, dialectView))
+                .withSideInputs(tx, dialectView));
   }
 
   private static class ReadInformationSchemaFn extends DoFn<Void, Ddl> {
     private final SpannerConfig spannerConfig;
-    private transient ExposedSpannerAccessor spannerAccessor;
+    private transient SpannerAccessor spannerAccessor;
     private final PCollectionView<Transaction> tx;
+    private final PCollectionView<Dialect> dialectView;
 
-    public ReadInformationSchemaFn(SpannerConfig spannerConfig, PCollectionView<Transaction> tx) {
+    public ReadInformationSchemaFn(
+        SpannerConfig spannerConfig,
+        PCollectionView<Transaction> tx,
+        PCollectionView<Dialect> dialectView) {
       this.spannerConfig = spannerConfig;
       this.tx = tx;
+      this.dialectView = dialectView;
     }
 
     @Setup
     public void setup() throws Exception {
-      spannerAccessor = ExposedSpannerAccessor.create(spannerConfig);
+      spannerAccessor = SpannerAccessor.getOrCreate(spannerConfig);
     }
 
     @Teardown
@@ -73,13 +85,14 @@ public class ReadInformationSchema extends PTransform<PBegin, PCollection<Ddl>> 
     @ProcessElement
     public void processElement(ProcessContext c) {
       Transaction transaction = c.sideInput(tx);
+      Dialect dialect = c.sideInput(dialectView);
       BatchTransactionId transactionId = transaction.transactionId();
 
       BatchClient batchClient = spannerAccessor.getBatchClient();
 
       BatchReadOnlyTransaction context = batchClient.batchReadOnlyTransaction(transactionId);
 
-      InformationSchemaScanner scanner = new InformationSchemaScanner(context);
+      InformationSchemaScanner scanner = new InformationSchemaScanner(context, dialect);
       Ddl ddl = scanner.scan();
       c.output(ddl);
     }
