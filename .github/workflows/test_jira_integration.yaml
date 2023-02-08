@@ -29,7 +29,7 @@ jobs:
 
     steps:
       # Checkout the repository to the GitHub Actions runner
-#      - name: Checkout
+      #      - name: Checkout
       #        uses: actions/checkout@v2
       #        with:
       #          # Fetch all history. Needed for fetching any previous autoformatting commits pushed by other workflows in the same PR
@@ -47,7 +47,7 @@ jobs:
 
       - name: Create
         id: create
-        uses: atlassian/gajira-create@3.0.0
+        uses: atlassian/gajira-create@3
         with:
           project: DATAENG
           issuetype: Strory
