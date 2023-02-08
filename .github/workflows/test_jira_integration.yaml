@@ -1,0 +1,58 @@
+name: 'data_infra_jira'
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'jira-test/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'jira-test/**'
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+
+    # Use the Bash shell regardless whether the GitHub Actions runner is ubuntu-latest, macos-latest, or windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: jira-test
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      # Checkout the repository to the GitHub Actions runner
+#      - name: Checkout
+      #        uses: actions/checkout@v2
+      #        with:
+      #          # Fetch all history. Needed for fetching any previous autoformatting commits pushed by other workflows in the same PR
+      #          # The default is fetching one latest commit only
+      #          fetch-depth: 0
+      #          # checkout to the latest branch reference HEAD. Needed for when pushing fmt commits
+      #          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Login
+        uses: atlassian/gajira-login@v3
+        env:
+          JIRA_BASE_URL: 'https://epidemicsound.atlassian.net/'
+          JIRA_USER_EMAIL: 'kirill.barkunov@epidemicsound.com'
+          JIRA_API_TOKEN: 'ATATT3xFfGF0knb3EZ-BAFU1tG8esCFfzddx3D3e5MjyI0wDF_vwpcoaYbewaHohrEeA_5pFfkWX0XOgS9zkEP5VSSShfBWcXtUEDRyG41Cp8y6yCsxiZhBvk85ggg6yCqpv8QR5LGcDvIkr76jpYQ-rrkkp5ny1lGD_iXy3fmD8Gv6Sss4_0Pg=550B572B'
+
+      - name: Create
+        id: create
+        uses: atlassian/gajira-create@3.0.0
+        with:
+          project: DATAENG
+          issuetype: Strory
+          summary: This tickes has been created from Github workflow
+          description: Testing Github <-> Jira integration
+
+      - name: Log created issue
+        run: echo "Issue ${{ steps.create.outputs.issue }} was created"
